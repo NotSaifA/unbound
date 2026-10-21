@@ -4,9 +4,31 @@
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
+# If a package fails to install, show which one and trace its install script.
+explain_failure() {
+    echo "::error::installing the built packages failed"
+    dpkg --audit || true
+    dpkg-query -W -f='${db:Status-Abbrev} ${Package}\n' \
+        | awk '$1 != "ii" && $1 != "rc" { print $2 }' \
+        | while read -r pkg; do
+            echo "----- $pkg is not fully installed"
+            for script in postinst preinst; do
+                f="/var/lib/dpkg/info/$pkg.$script"
+                [ -f "$f" ] || continue
+                echo "----- replaying $f with tracing"
+                sh -x "$f" configure || echo "----- $f exited with status $?"
+            done
+        done
+    for f in /usr/lib/sysusers.d/unbound*.conf /usr/lib/tmpfiles.d/unbound*.conf; do
+        [ -f "$f" ] && { echo "----- $f"; cat "$f"; }
+    done
+    if command -v systemd-sysusers > /dev/null; then systemd-sysusers --version | head -n 1; fi
+    exit 1
+}
+
 apt-get update -qq
-apt-get install -y --no-install-recommends /out/debs/*.deb \
-    bind9-dnsutils dns-root-data ca-certificates > /dev/null
+apt-get install -y -q --no-install-recommends /out/debs/*.deb \
+    bind9-dnsutils dns-root-data ca-certificates || explain_failure
 
 unbound -V | head -n 3
 id unbound

@@ -9,6 +9,14 @@ here=$(cd "$(dirname "$0")" && pwd)
 bundle="$out/unbound-noble-$(dpkg --print-architecture).tar.gz"
 export DEBIAN_FRONTEND=noninteractive NEEDRESTART_SUSPEND=1
 
+on_failure() {
+    echo "::error::upgrade test failed"
+    dpkg --audit || true
+    systemctl status unbound --no-pager || true
+    journalctl -u unbound --no-pager -n 50 || true
+}
+trap on_failure ERR
+
 apt-get update -qq
 apt-get install -y unbound bind9-dnsutils > /dev/null
 old=$(dpkg-query -W -f='${Version}' unbound)

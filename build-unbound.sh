@@ -272,10 +272,43 @@ PKG_VERSION="${DEB_VERSION}~ubuntu${VERSION_ID}.${BUILD_REV}"
 UPSTREAM_VERSION=${DEB_VERSION#*:}
 UPSTREAM_VERSION=${UPSTREAM_VERSION%-*}
 
+# --------------------------------------------------------------------------
+# Adapt Debian's packaging to this Ubuntu release.
+# --------------------------------------------------------------------------
+changes=()
+
+# sysusers.d files may use "u!" (create a fully locked account), which
+# systemd-sysusers only understands from systemd 257 on. Ubuntu 24.04 has
+# systemd 255, which rejects the line, so the package's postinst would fail.
+# A plain "u" line creates the same system user (password locked, no shell).
+systemd_version=$(apt-cache policy systemd 2>/dev/null | awk '$1 == "Candidate:" { print $2; exit }')
+if [ -z "$systemd_version" ] || [ "$systemd_version" = "(none)" ] \
+        || dpkg --compare-versions "$systemd_version" lt 257; then
+    for f in "$SRCDIR"/debian/*sysusers; do
+        [ -f "$f" ] || continue
+        if grep -Eq '^[[:space:]]*u!' "$f"; then
+            sed -Ei 's/^([[:space:]]*)u!/\1u/' "$f"
+            changes+=("debian/$(basename "$f"): use \"u\" instead of \"u!\", which needs systemd 257 (Ubuntu $VERSION_ID has ${systemd_version:-an older version}).")
+        fi
+    done
+fi
+
+for f in "$SRCDIR"/debian/*sysusers; do
+    [ -f "$f" ] || continue
+    log "debian/$(basename "$f"):"
+    sed 's/^/        /' "$f" >&2
+done
+for change in ${changes[@]+"${changes[@]}"}; do
+    log "adjusted $change"
+done
+
 {
     printf 'unbound (%s) %s; urgency=medium\n\n' "$PKG_VERSION" "$VERSION_CODENAME"
-    printf '  * Automated rebuild of Debian unbound %s for Ubuntu %s.\n\n' "$DEB_VERSION" "$VERSION_ID"
-    printf ' -- %s  %s\n\n' "$BUILD_MAINTAINER" "$(date -R)"
+    printf '  * Automated rebuild of Debian unbound %s for Ubuntu %s.\n' "$DEB_VERSION" "$VERSION_ID"
+    for change in ${changes[@]+"${changes[@]}"}; do
+        printf '  * %s\n' "$change"
+    done
+    printf '\n -- %s  %s\n\n' "$BUILD_MAINTAINER" "$(date -R)"
     cat "$SRCDIR/debian/changelog"
 } > "$SRCDIR/debian/changelog.new"
 mv "$SRCDIR/debian/changelog.new" "$SRCDIR/debian/changelog"
