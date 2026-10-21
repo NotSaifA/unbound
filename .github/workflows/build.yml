@@ -1,0 +1,112 @@
+name: Build unbound for Ubuntu 24.04
+
+# Checks Debian for a new unbound package a few times a day. When there is
+# one, it rebuilds it for Ubuntu 24.04, tests it (fresh install, plus an
+# upgrade over Ubuntu's own unbound with DNSSEC checks) and publishes the
+# bundle as a GitHub release that update-unbound.sh can install.
+
+on:
+  schedule:
+    - cron: "41 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Build and publish even if this version was already released
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-unbound
+  cancel-in-progress: false
+
+env:
+  DEBIAN_SUITE: unstable
+  # Raise this to rebuild the same Debian version (~ubuntu24.04.2, ...).
+  BUILD_REV: "1"
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      tag: ${{ steps.check.outputs.tag }}
+      build: ${{ steps.check.outputs.build }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Look up Debian's current unbound version
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          version=$(bash build-unbound.sh --docker --print-version)
+          tag="unbound-$(printf '%s' "$version" | tr '~:+' '---')-noble.${BUILD_REV}"
+          echo "Debian $DEBIAN_SUITE has unbound $version"
+          build=true
+          if gh release view "$tag" > /dev/null 2>&1 && [ "$FORCE" != "true" ]; then
+            echo "Release $tag already exists, nothing to do."
+            build=false
+          fi
+          {
+            echo "version=$version"
+            echo "tag=$tag"
+            echo "build=$build"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: check
+    if: needs.check.outputs.build == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          # ARM server? Uncomment the next two lines (free on public repositories).
+          # - arch: arm64
+          #   runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    env:
+      DEB_VERSION: ${{ needs.check.outputs.version }}
+      TAG: ${{ needs.check.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build in a clean Ubuntu 24.04 container
+        run: bash build-unbound.sh --docker
+
+      - name: Test a fresh install on stock Ubuntu 24.04
+        run: |
+          docker run --rm -v "$PWD/out:/out:ro" -v "$PWD/ci:/ci:ro" ubuntu:24.04 \
+            bash /ci/test-fresh.sh
+
+      - name: Test upgrading Ubuntu's own unbound with update-unbound.sh
+        run: sudo bash ci/test-upgrade.sh out
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          cat > notes.md <<EOF
+          Debian's unbound \`$DEB_VERSION\` rebuilt for Ubuntu 24.04 LTS, tested before publishing.
+
+          Install or update on a server:
+
+              sudo bash update-unbound.sh --repo $GITHUB_REPOSITORY
+
+          Upstream changes: https://nlnetlabs.nl/projects/unbound/download/
+          Debian packaging: https://tracker.debian.org/pkg/unbound
+          EOF
+          if ! gh release view "$TAG" > /dev/null 2>&1; then
+            # Another architecture's job may create it at the same moment.
+            gh release create "$TAG" --latest --title "unbound $DEB_VERSION for Ubuntu 24.04" \
+              --notes-file notes.md || true
+          fi
+          gh release upload "$TAG" --clobber \
+            "out/unbound-noble-$ARCH.tar.gz" \
+            "out/unbound-noble-$ARCH.tar.gz.sha256"
